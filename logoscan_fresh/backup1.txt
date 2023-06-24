@@ -1,0 +1,117 @@
+from django.shortcuts import render
+from .image_comparison.main import Searcher, ColorDescriptor
+# Create your views here.
+
+from ctypes import sizeof
+import cv2
+from django.shortcuts import render
+from django.http import HttpResponse, JsonResponse
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework import status
+from .serializers import LogoSerializer
+import os
+from logoscan.settings import BASE_DIR, STATIC_ROOT
+from pymongo import MongoClient
+import gridfs
+import pprint
+import numpy as np
+from bson.objectid import ObjectId
+
+
+def index(request):
+    return JsonResponse({"message": "This is the backend api."})
+
+
+
+
+
+class LogoUploadView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request, *args, **kwargs):
+        # Create database and collections
+        client = MongoClient("mongodb+srv://ahmed:9izIB3wFIls8vins@cluster0.j9hy3nb.mongodb.net/?retryWrites=true&w=majority")
+        database = client['logoscan']
+        index_database = database.index
+        cd = ColorDescriptor((8, 12, 3))
+        # Get logo data from the api post request
+        data = request.data
+        logo = data['image']
+
+        category = data['category']
+        product = data['product']
+        brand = data['brand']
+
+        # initialize gridFs to store logo in database
+        fs = gridfs.GridFS(database)
+        logoId = fs.put(logo, name=logo.name,
+                        **{
+                            'category': category,
+                            'product': product,
+                            'brand': brand,
+                        }
+                        )
+
+        # process numpy array with logodata stored in database
+        nparr = np.frombuffer(fs.get(logoId).read(), np.uint8)
+        # decode numpy array and descibe image for comparison
+        image = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+        features = cd.describe(image)
+        # convet features to float because searcher need it to be float
+        features = [float(x) for x in features]
+
+        searcher = Searcher()
+        # do the search for the image features in all index database features
+        results = searcher.search(
+            queryFeatures=features, imagesData=master_images_index.find())
+
+        # see this print
+        print("____\n")
+        print(results)
+        print("____\n")
+
+        # if the database is empty
+        # or
+        # the first image in the results which is the most simillar one to the input image
+        # it's distance is > 0.1 means that the image is not dubplicated (dublicated == 0.0 i think)
+        # it will add the image to the database
+
+        if len(results) == 0 or results[0][1] > 0.1:
+            index_database.insert_one(
+                {'file_id': logoId, 'features': features})
+        else:
+            fs.delete(logoId)
+
+        limit = 3
+        images = []
+        for i in results[:limit]:
+            images.append("http://127.0.0.1:8000/api/image/"+i[0])
+
+        return JsonResponse({'results': images}, status=status.HTTP_201_CREATED)
+
+
+class ImageAPIView(APIView):
+
+
+    def get(self, request, id):
+        # Create database and collections
+        client = MongoClient("mongodb+srv://ahmed:9izIB3wFIls8vins@cluster0.j9hy3nb.mongodb.net/?retryWrites=true&w=majority")
+        database = client['logoscan']
+        # Connect to MongoDB
+        fs = gridfs.GridFS(database)
+        # Retrieve the image data from MongoDB
+
+        image_data = fs.get(ObjectId(id)).read()
+        fileName = database.fs.files.find_one(
+            {
+                "_id": ObjectId(id)
+            }
+        )["name"]
+        # get png or jpg part
+        fileExtension = fileName.split(".")[-1]
+
+        # Serialize the image data to return it as a response
+        # return Response({'image_data': image_data})
+        return HttpResponse(image_data, content_type=f'image/{fileExtension}')
